@@ -1,15 +1,25 @@
 """
 error_control.py
-Error detection/correction utilities (CRC/Hamming will be implemented later).
+Integrity checking using CRC32.
 """
 
-class ErrorControlError(Exception):
-    pass
+import zlib
 
-def add_integrity(data: bytes) -> bytes:
-    """Attach integrity or redundancy information to data."""
-    raise NotImplementedError
 
-def verify_and_strip(data: bytes) -> bytes:
-    """Verify data integrity/correct errors and return original payload."""
-    raise NotImplementedError
+def crc32_hex(data: bytes) -> str:
+    """Return CRC32 as 8-char hex string."""
+    return format(zlib.crc32(data) & 0xFFFFFFFF, "08x")
+
+
+def add_integrity(payload: str) -> str:
+    """
+    Compute CRC32 for a payload string.
+    Returns hex digest string.
+    """
+    return crc32_hex(payload.encode("utf-8"))
+
+
+def verify_integrity(payload: str, integrity: str) -> bool:
+    """Verify payload matches the given CRC32 hex."""
+    expected = add_integrity(payload)
+    return expected == integrity
