@@ -1,24 +1,31 @@
 """
 client.py
-E2EE chat client (WhatsApp-style idea, simplified):
-- registers username + ECDH public key
-- /key <user> fetches and caches their public key
-- derives and caches a persistent AES session key per user (ECDH + HKDF)
-- encrypts payload for the recipient (server cannot decrypt)
-- receiver decrypts locally before displaying
-- CRC32 is used as "error control" demo on plaintext (verify after decrypt)
-"""
+Secure E2EE chat client.
 
+Features
+- registers username + ECDH public key
+- requests another user's public key
+- shows public key fingerprint for verification
+- requires explicit trust before deriving session key
+- derives AES session key using ECDH + HKDF
+- encrypts messages using AES-256-GCM
+- CRC32 used to verify integrity
+"""
+print("THIS IS THE NEW CLIENT FILE")
 import base64
 import json
 import socket
 import threading
 
-from client.key_exchange import generate_keypair, load_public_key, derive_shared_key
+from client.key_exchange import (
+    generate_keypair,
+    load_public_key,
+    derive_shared_key,
+    public_key_fingerprint,
+)
+
 from client.encryption import encrypt_message, decrypt_message
 from client.error_control import add_integrity, verify_integrity
-from collections import defaultdict, deque
-from datetime import datetime
 
 HOST = "127.0.0.1"
 PORT = 5000
@@ -33,20 +40,23 @@ def b64d(text: str) -> bytes:
 
 
 def receive_messages(
-    sock: socket.socket,
-    username: str,                 # ✅ added
+    sock,
+    username,
     my_private_key,
-    my_pubkey_pem: str,
-    peer_pubkeys: dict[str, str],
-    session_keys: dict[str, bytes],
-) -> None:
+    my_pubkey_pem,
+    peer_pubkeys,
+    pending_pubkeys,
+    session_keys,
+):
     while True:
         try:
             data = sock.recv(4096)
+
             if not data:
                 break
 
             text = data.decode("utf-8", errors="replace")
+
             try:
                 msg = json.loads(text)
             except json.JSONDecodeError:
@@ -55,34 +65,42 @@ def receive_messages(
 
             mtype = msg.get("type", "unknown")
 
+            # REGISTERED
             if mtype == "registered":
                 print(f"\n[server] Registered as {msg.get('username')}")
                 continue
 
+            # ERROR
             if mtype == "error":
                 print(f"\n[server] ERROR: {msg.get('message')}")
                 continue
 
+            # PUBLIC KEY RECEIVED
             if mtype == "pubkey":
                 u = msg.get("username")
                 pk = msg.get("pubkey")
+
                 if u and pk:
-                    peer_pubkeys[u] = pk
-                    print(f"\n[server] Saved public key for {u}.")
-                    # derive session key immediately (persistent per user)
-                    try:
-                        peer_key = load_public_key(pk.encode("utf-8"))
-                        session_keys[u] = derive_shared_key(my_private_key, peer_key)
-                        print(f"[client] Session key derived for {u}.")
-                    except Exception as e:
-                        print(f"[client] Failed to derive key for {u}: {e}")
+                    print(f"\n[server] Public key received for {u}")
+
+                    fingerprint = public_key_fingerprint(pk.encode())
+
+                    print(f"[security] Fingerprint for {u}:")
+                    print(f"{fingerprint}")
+
+                    print(f"[security] Run /trust {u} to accept this key")
+                    print(f"[security] Or /reject {u} to reject it")
+
+                    # store as pending until user explicitly trusts it
+                    pending_pubkeys[u] = pk
+
                 continue
 
+            # CHAT MESSAGE
             if mtype == "chat":
-                # ✅ STRICT RECIPIENT CHECK
                 intended = msg.get("to", "")
+
                 if intended != username:
-                    # Ignore messages not meant for this client
                     continue
 
                 sender = msg.get("from", "unknown")
@@ -90,128 +108,196 @@ def receive_messages(
                 integrity = msg.get("integrity", "")
                 sender_pubkey = msg.get("from_pubkey", "")
 
-                # If we don't have sender session key yet, derive it using sender_pubkey
+                # derive session key if needed
                 if sender not in session_keys:
                     if sender_pubkey:
-                        peer_pubkeys[sender] = sender_pubkey
                         try:
-                            peer_key = load_public_key(sender_pubkey.encode("utf-8"))
-                            session_keys[sender] = derive_shared_key(my_private_key, peer_key)
-                            print(f"\n[client] Derived and cached session key for {sender}.")
+                            peer_key = load_public_key(sender_pubkey.encode())
+                            session_keys[sender] = derive_shared_key(
+                                my_private_key,
+                                peer_key
+                            )
+                            print(f"\n[client] Derived session key for {sender}")
                         except Exception as e:
-                            print(f"\n[client] Cannot derive key for {sender}: {e}")
+                            print(f"\n[client] Cannot derive key: {e}")
                             continue
                     else:
-                        print(f"\n[client] No key for sender {sender}. Ask for it: /key {sender}")
+                        print(f"\n[client] Missing key for {sender}. Run /key {sender}")
                         continue
 
-                # Decrypt
+                # DECRYPT MESSAGE
                 try:
-                    plaintext_bytes = decrypt_message(session_keys[sender], b64d(enc_payload_b64))
+                    plaintext_bytes = decrypt_message(
+                        session_keys[sender],
+                        b64d(enc_payload_b64)
+                    )
+
                     plaintext = plaintext_bytes.decode("utf-8", errors="replace")
+
                 except Exception as e:
-                    print(f"\n[client] Decryption failed from {sender}: {e}")
+                    print(f"\n[client] Decryption failed: {e}")
                     continue
 
-                # CRC verification (error-control demo)
+                # CRC VERIFY
                 if verify_integrity(plaintext, integrity):
                     print(f"\n[{sender}] {plaintext}")
                 else:
-                    print(f"\n[WARNING] CRC integrity failed for message from {sender}")
-                continue
+                    print(f"\n[WARNING] CRC verification failed")
 
-            print(f"\n[server] {msg}")
+                continue
 
         except OSError:
             break
 
 
-def main() -> None:
-    username = input("Enter your username (unique): ").strip()
+def main():
+    username = input("Enter your username: ").strip()
+
     if not username:
-        print("Username required.")
+        print("Username required")
         return
 
-    # ECDH identity keypair for this run (persistent session keys derived from this)
     kp = generate_keypair()
-    my_pubkey_pem = kp.public_key.public_bytes(
-        encoding=__import__("cryptography.hazmat.primitives.serialization").hazmat.primitives.serialization.Encoding.PEM,
-        format=__import__("cryptography.hazmat.primitives.serialization").hazmat.primitives.serialization.PublicFormat.SubjectPublicKeyInfo,
-    ).decode("utf-8")
 
-    peer_pubkeys: dict[str, str] = {}
-    session_keys: dict[str, bytes] = {}
+    from cryptography.hazmat.primitives import serialization
+
+    my_pubkey_pem = kp.public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode()
+
+    peer_pubkeys = {}
+    pending_pubkeys = {}
+    session_keys = {}
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect((HOST, PORT))
 
-    # Register
+    # REGISTER
     sock.sendall(json.dumps({
         "type": "register",
         "username": username,
-        "pubkey": my_pubkey_pem,
-    }).encode("utf-8"))
+        "pubkey": my_pubkey_pem
+    }).encode())
 
     print(f"Connected to server {HOST}:{PORT}")
-    print("Commands:")
-    print("  /key <username>          fetch and cache user's public key + derive session key")
-    print("  /msg <username> <text>   send an encrypted message (E2EE)")
-    print("  quit                     exit\n")
+
+    print("\nCommands:")
+    print("/key <user>            fetch public key")
+    print("/trust <user>          trust pending public key")
+    print("/reject <user>         reject pending public key")
+    print("/msg <user> <text>     send encrypted message")
+    print("quit\n")
 
     threading.Thread(
         target=receive_messages,
-        args=(sock, username, kp.private_key, my_pubkey_pem, peer_pubkeys, session_keys),  # ✅ updated
+        args=(
+            sock,
+            username,
+            kp.private_key,
+            my_pubkey_pem,
+            peer_pubkeys,
+            pending_pubkeys,
+            session_keys,
+        ),
         daemon=True
     ).start()
 
     try:
         while True:
             line = input().strip()
+
             if not line:
                 continue
+
             if line.lower() == "quit":
                 break
 
+            # KEY REQUEST
             if line.startswith("/key "):
                 target = line[5:].strip()
-                sock.sendall(json.dumps({"type": "get_pubkey", "username": target}).encode("utf-8"))
+
+                sock.sendall(json.dumps({
+                    "type": "get_pubkey",
+                    "username": target
+                }).encode())
+
                 continue
 
+            # TRUST PENDING KEY
+            if line.startswith("/trust "):
+                target = line[7:].strip()
+
+                if target not in pending_pubkeys:
+                    print(f"No pending key for {target}")
+                    continue
+
+                pk = pending_pubkeys.pop(target)
+                peer_pubkeys[target] = pk
+
+                try:
+                    peer_key = load_public_key(pk.encode())
+                    session_keys[target] = derive_shared_key(
+                        kp.private_key,
+                        peer_key
+                    )
+                    print(f"[client] Secure session key established for {target}")
+                except Exception as e:
+                    print(f"[client] Failed to derive key for {target}: {e}")
+
+                continue
+
+            # REJECT PENDING KEY
+            if line.startswith("/reject "):
+                target = line[8:].strip()
+
+                if target in pending_pubkeys:
+                    pending_pubkeys.pop(target, None)
+                    print(f"[client] Rejected key for {target}")
+                else:
+                    print(f"No pending key for {target}")
+
+                continue
+
+            # SEND MESSAGE
             if line.startswith("/msg "):
                 parts = line.split(" ", 2)
+
                 if len(parts) < 3:
-                    print("Usage: /msg <username> <text>")
+                    print("Usage: /msg <user> <text>")
                     continue
 
-                to_user = parts[1].strip()
-                msg_text = parts[2]
+                to_user = parts[1]
+                message = parts[2]
 
-                # Require cached session key (persistent approach)
                 if to_user not in session_keys:
-                    print(f"No session key for {to_user}. Run: /key {to_user}")
+                    print(f"No trusted key for {to_user}. Run /key {to_user} then /trust {to_user}")
                     continue
 
-                # CRC over plaintext (error-control demo)
-                integrity = add_integrity(msg_text)
+                integrity = add_integrity(message)
 
-                # Encrypt plaintext for recipient using derived session key
-                blob = encrypt_message(session_keys[to_user], msg_text.encode("utf-8"))
-                payload_b64 = b64e(blob)
+                encrypted_blob = encrypt_message(
+                    session_keys[to_user],
+                    message.encode()
+                )
+
+                payload_b64 = b64e(encrypted_blob)
 
                 sock.sendall(json.dumps({
                     "type": "chat",
                     "to": to_user,
                     "payload": payload_b64,
                     "integrity": integrity,
-                    "from_pubkey": my_pubkey_pem,  # lets receiver derive key if needed
-                }).encode("utf-8"))
+                    "from_pubkey": my_pubkey_pem
+                }).encode())
+
                 continue
 
-            print("Unknown command. Use /key, /msg, or quit.")
+            print("Unknown command")
 
     finally:
         sock.close()
-        print("Disconnected.")
+        print("Disconnected")
 
 
 if __name__ == "__main__":

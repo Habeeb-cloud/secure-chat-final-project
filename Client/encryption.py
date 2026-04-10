@@ -19,27 +19,25 @@ def generate_key() -> bytes:
 def encrypt_message(key: bytes, plaintext: bytes) -> bytes:
     """
     Encrypt using AES-GCM.
-    Returns: nonce (12 bytes) + ciphertext+tag (variable)
+    Returns nonce + ciphertext.
     """
     try:
         aesgcm = AESGCM(key)
         nonce = os.urandom(12)
-        ciphertext = aesgcm.encrypt(nonce, plaintext, associated_data=None)
+        ciphertext = aesgcm.encrypt(nonce, plaintext, None)
         return nonce + ciphertext
     except Exception as e:
-        raise EncryptionError(str(e)) from e
+        raise EncryptionError(str(e))
 
 
 def decrypt_message(key: bytes, blob: bytes) -> bytes:
     """
-    Decrypt AES-GCM blob: nonce (12 bytes) + ciphertext+tag.
+    Decrypt AES-GCM message.
     """
     try:
-        if len(blob) < 13:
-            raise EncryptionError("Ciphertext blob too short.")
         nonce = blob[:12]
         ciphertext = blob[12:]
         aesgcm = AESGCM(key)
-        return aesgcm.decrypt(nonce, ciphertext, associated_data=None)
+        return aesgcm.decrypt(nonce, ciphertext, None)
     except Exception as e:
-        raise EncryptionError(str(e)) from e
+        raise EncryptionError(str(e))
