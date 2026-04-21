@@ -41,7 +41,7 @@ def create_tables():
     )
     """)
 
-    # 🔥 NEW: MESSAGES TABLE
+    # MESSAGES TABLE
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -107,12 +107,7 @@ def login_user(username, password):
     user = cursor.fetchone()
     conn.close()
 
-    if user:
-        print("Login successful.")
-        return True
-    else:
-        print("Invalid username or password.")
-        return False
+    return user is not None
 
 
 # =========================
@@ -189,7 +184,23 @@ def search_contact(owner, name):
 
 
 # =========================
-# 💬 MESSAGE FUNCTIONS (NEW)
+# ❌ DELETE CONTACT (NEW)
+# =========================
+def delete_contact(owner, contact):
+    conn = create_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "DELETE FROM contacts WHERE owner=? AND contact_name=?",
+        (owner, contact)
+    )
+
+    conn.commit()
+    conn.close()
+
+
+# =========================
+# 💬 MESSAGE FUNCTIONS
 # =========================
 def save_message(sender, receiver, message):
     conn = create_connection()
@@ -219,6 +230,23 @@ def get_messages(user1, user2):
     conn.close()
 
     return results
+
+
+# =========================
+# ❌ CLEAR CHAT (NEW)
+# =========================
+def delete_messages(user1, user2):
+    conn = create_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        DELETE FROM messages
+        WHERE (sender=? AND receiver=?)
+        OR (sender=? AND receiver=?)
+    """, (user1, user2, user2, user1))
+
+    conn.commit()
+    conn.close()
 
 
 # =========================

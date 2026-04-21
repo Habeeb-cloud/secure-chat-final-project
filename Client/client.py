@@ -29,7 +29,7 @@ from error_control import add_integrity, verify_integrity
 from hmac_auth import generate_hmac, verify_hmac
 
 HOST = "127.0.0.1"
-PORT = 5000
+PORT = 5001
 
 
 def b64e(data: bytes) -> str:

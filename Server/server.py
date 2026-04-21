@@ -1,6 +1,12 @@
 """
 server.py
 Directory + router server for E2EE chat.
+
+Handles:
+- user registration
+- public key lookup
+- message forwarding (payload + hmac)
+- proper TCP framing (FIXED)
 """
 
 import json
@@ -8,91 +14,130 @@ import socket
 import threading
 
 HOST = "127.0.0.1"
-PORT = 5000
+PORT = 5001
 
 user_sockets = {}
 user_pubkeys = {}
 
 
+# 🔥 FIX: newline-delimited JSON
 def safe_send(sock, obj):
     try:
-        sock.sendall(json.dumps(obj).encode())
-    except:
-        pass
+        sock.sendall((json.dumps(obj) + "\n").encode())
+    except Exception as e:
+        print(f"[send error] {e}")
 
 
 def handle_client(client_socket):
     username = None
+    buffer = ""
 
     try:
-        data = client_socket.recv(4096)
-        reg = json.loads(data.decode())
-
-        if reg.get("type") != "register":
-            return
-
-        username = reg["username"]
-        pubkey = reg["pubkey"]
-
-        user_sockets[username] = client_socket
-        user_pubkeys[username] = pubkey
-
-        print(f"User registered: {username}")
-
-        safe_send(client_socket, {"type": "registered", "username": username})
-
         while True:
-            data = client_socket.recv(4096)
-            if not data:
+            chunk = client_socket.recv(4096).decode()
+            if not chunk:
                 break
 
-            msg = json.loads(data.decode())
-            mtype = msg.get("type")
+            buffer += chunk
 
-            if mtype == "get_pubkey":
-                target = msg["username"]
+            # 🔥 FIX: handle multiple / partial messages
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
 
-                if target in user_pubkeys:
+                try:
+                    msg = json.loads(line)
+                except:
+                    print("[error] bad json")
+                    continue
+
+                mtype = msg.get("type")
+
+                # ===== REGISTER =====
+                if mtype == "register":
+                    username = msg.get("username")
+                    pubkey = msg.get("pubkey")
+
+                    if not username:
+                        continue
+
+                    user_sockets[username] = client_socket
+
+                    if pubkey:
+                        user_pubkeys[username] = pubkey
+
+                    print(f"[+] {username} connected")
+
                     safe_send(client_socket, {
-                        "type": "pubkey",
-                        "username": target,
-                        "pubkey": user_pubkeys[target]
-                    })
-                else:
-                    safe_send(client_socket, {
-                        "type": "error",
-                        "message": "user not found"
+                        "type": "registered",
+                        "username": username
                     })
 
-            elif mtype == "chat":
-                to_user = msg["to"]
+                # ===== GET PUBLIC KEY =====
+                elif mtype == "get_pubkey":
+                    target = msg.get("username")
 
-                if to_user in user_sockets:
-                    msg["from"] = username
-                    safe_send(user_sockets[to_user], msg)
+                    if target in user_pubkeys:
+                        safe_send(client_socket, {
+                            "type": "pubkey",
+                            "username": target,
+                            "pubkey": user_pubkeys[target]
+                        })
+                    else:
+                        safe_send(client_socket, {
+                            "type": "error",
+                            "message": "user not found"
+                        })
 
-                    preview = msg["payload"][:30]
-                    print(f"{username} -> {to_user} | ciphertext: {preview}...")
+                # ===== CHAT =====
+                elif mtype == "chat":
+                    to_user = msg.get("to")
+
+                    if to_user in user_sockets:
+                        forward = {
+                            "type": "chat",
+                            "from": username,
+                            "payload": msg.get("payload"),
+                            "hmac": msg.get("hmac")  # ✅ REQUIRED
+                        }
+
+                        safe_send(user_sockets[to_user], forward)
+
+                        print(f"[msg] {username} -> {to_user}")
+                    else:
+                        print(f"[warn] {to_user} not online")
+
+    except Exception as e:
+        print(f"[connection error] {e}")
 
     finally:
-        if username in user_sockets:
-            del user_sockets[username]
-            del user_pubkeys[username]
+        if username:
+            user_sockets.pop(username, None)
+            user_pubkeys.pop(username, None)
+            print(f"[-] {username} disconnected")
 
         client_socket.close()
-        print("Client disconnected")
 
 
 def main():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    # 🔥 Prevent port lock issue
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
     server.bind((HOST, PORT))
     server.listen()
 
     print(f"Server running on {HOST}:{PORT}")
 
     while True:
-        client_socket, _ = server.accept()
-        threading.Thread(target=handle_client, args=(client_socket,), daemon=True).start()
+        client_socket, addr = server.accept()
+        print(f"[new connection] {addr}")
+
+        threading.Thread(
+            target=handle_client,
+            args=(client_socket,),
+            daemon=True
+        ).start()
 
 
 if __name__ == "__main__":

@@ -2,8 +2,9 @@ import hmac
 import hashlib
 
 def generate_hmac(key: bytes, message: bytes) -> str:
-    return hmac.new(key, message, hashlib.sha256).hexdigest()
+    mac = hmac.new(key, message, hashlib.sha256).digest()
+    return mac.hex()
 
-def verify_hmac(key: bytes, message: bytes, tag: str) -> bool:
-    expected = generate_hmac(key, message)
-    return hmac.compare_digest(expected, tag)
+def verify_hmac(key: bytes, message: bytes, mac_hex: str) -> bool:
+    expected = hmac.new(key, message, hashlib.sha256).digest()
+    return hmac.compare_digest(expected, bytes.fromhex(mac_hex))
